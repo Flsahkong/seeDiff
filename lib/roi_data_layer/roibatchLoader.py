@@ -18,9 +18,8 @@ import numpy as np
 import random
 import time
 import pdb
-
 class roibatchLoader(data.Dataset):
-  def __init__(self, roidb, ratio_list, ratio_index, batch_size, num_classes, training=True, normalize=None):
+  def __init__(self, roidb, ratio_list, ratio_index, batch_size, num_classes, training=True, normalize=None,seg_return=False,path_return=False):
     self._roidb = roidb
     self._num_classes = num_classes
     # we make the height of image consistent to trim_height, trim_width
@@ -33,7 +32,8 @@ class roibatchLoader(data.Dataset):
     self.ratio_index = ratio_index
     self.batch_size = batch_size
     self.data_size = len(self.ratio_list)
-
+    self.seg_return = seg_return
+    self.path_return = path_return
     # given the ratio_list, we want to make the ratio same for each batch.
     self.ratio_list_batch = torch.Tensor(self.data_size).zero_()
     num_batch = int(np.ceil(len(ratio_index) / batch_size))
@@ -51,7 +51,7 @@ class roibatchLoader(data.Dataset):
             # for ratio cross 1, we make it to be 1.
             target_ratio = 1
 
-        self.ratio_list_batch[left_idx:(right_idx+1)] = torch.tensor(target_ratio.astype(np.float64)) # trainset ratio list ,each batch is same number
+        self.ratio_list_batch[left_idx:(right_idx+1)] = target_ratio
 
 
   def __getitem__(self, index):
@@ -64,7 +64,7 @@ class roibatchLoader(data.Dataset):
     # here we set the anchor index to the last one
     # sample in this group
     minibatch_db = [self._roidb[index_ratio]]
-    blobs = get_minibatch(minibatch_db, self._num_classes)
+    blobs = get_minibatch(minibatch_db, self._num_classes,seg_return=self.seg_return)
     data = torch.from_numpy(blobs['data'])
     im_info = torch.from_numpy(blobs['im_info'])
     # we need to random shuffle the bounding box.
@@ -201,8 +201,13 @@ class roibatchLoader(data.Dataset):
             # permute trim_data to adapt to downstream processing
         padding_data = padding_data.permute(2, 0, 1).contiguous()
         im_info = im_info.view(3)
-
-        return padding_data, im_info, gt_boxes_padding, num_boxes
+        if self.seg_return:
+            seg_map = torch.from_numpy(np.resize(blobs['seg_map'],(data_height,data_width)))
+            return padding_data, im_info, gt_boxes_padding, num_boxes, seg_map
+        elif self.path_return:
+            return padding_data, im_info, gt_boxes_padding, num_boxes, blobs['path']
+        else:
+            return padding_data, im_info, gt_boxes_padding, num_boxes
     else:
         data = data.permute(0, 3, 1, 2).contiguous().view(3, data_height, data_width)
         im_info = im_info.view(3)
@@ -210,7 +215,7 @@ class roibatchLoader(data.Dataset):
         gt_boxes = torch.FloatTensor([1,1,1,1,1])
         num_boxes = 0
 
-        return data, im_info, gt_boxes, num_boxes
+        return data, im_info, gt_boxes, num_boxes, blobs['path']
 
   def __len__(self):
     return len(self._roidb)

@@ -3,7 +3,7 @@ from __future__ import division
 from __future__ import print_function
 
 from model.utils.config import cfg
-from model.faster_rcnn.faster_rcnn import _fasterRCNN
+from model.faster_rcnn.faster_rcnn_imgandfclevel import _fasterRCNN
 
 import torch
 import torch.nn as nn
@@ -29,8 +29,30 @@ def conv3x3(in_planes, out_planes, stride=1):
   "3x3 convolution with padding"
   return nn.Conv2d(in_planes, out_planes, kernel_size=3, stride=stride,
            padding=1, bias=False)
-
-
+def conv1x1(in_planes, out_planes, stride=1):
+  "3x3 convolution with padding"
+  return nn.Conv2d(in_planes, out_planes, kernel_size=1, stride=stride,
+           padding=1, bias=False)
+class netD(nn.Module):
+    def __init__(self,context=False):
+        super(netD, self).__init__()
+        self.conv1 = conv1x1(1024, 512, stride=1)
+        self.conv2 = conv1x1(512, 2, stride=1)
+    def forward(self, x):
+        x = F.relu(self.conv1(x))
+        x = self.conv2(x)
+        return x.view(-1, 2)
+class netD_dc(nn.Module):
+    def __init__(self):
+        super(netD_dc, self).__init__()
+        self.fc1 = nn.Linear(2048,1024)
+        self.fc2 = nn.Linear(1024,1024)
+        self.fc3 = nn.Linear(1024,2)
+    def forward(self, x):
+        x = F.dropout(F.relu(self.fc1(x)),training=self.training)
+        x = F.dropout(F.relu(self.fc2(x)),training=self.training)
+        x = self.fc3(x)
+        return x
 class BasicBlock(nn.Module):
   expansion = 1
 
@@ -218,13 +240,17 @@ def resnet152(pretrained=False):
   return model
 
 class resnet(_fasterRCNN):
-  def __init__(self, classes, num_layers=101, pretrained=False, class_agnostic=False):
-    self.model_path = '/home/grad3/keisaito/data/pretrained_model/resnet101_caffe.pth'
+  def __init__(self, classes, num_layers=101, pretrained=False, class_agnostic=False,context=False):
+    import getpass
+    if 'ksaito' in getpass.getuser():
+      self.model_path = '/home/mil/ksaito/domain_adaptation/faster-rcnn.pytorch/data/pretrained_model/resnet101_caffe.pth'
+    else:
+      self.model_path = '/home/grad3/keisaito/data/pretrained_model/resnet101_caffe.pth'
     self.dout_base_model = 1024
     self.pretrained = pretrained
     self.class_agnostic = class_agnostic
-
-    _fasterRCNN.__init__(self, classes, class_agnostic)
+    self.context = context
+    _fasterRCNN.__init__(self, classes, class_agnostic,context)
 
   def _init_modules(self):
     resnet = resnet101()
@@ -237,14 +263,17 @@ class resnet(_fasterRCNN):
     # Build resnet.
     self.RCNN_base = nn.Sequential(resnet.conv1, resnet.bn1,resnet.relu,
       resnet.maxpool,resnet.layer1,resnet.layer2,resnet.layer3)
-
+    self.netD = netD(context=self.context)
+    self.netD_dc = netD_dc()
     self.RCNN_top = nn.Sequential(resnet.layer4)
-
-    self.RCNN_cls_score = nn.Linear(2048, self.n_classes)
+    feat_d = 2048
+    if self.context:
+      feat_d += 128
+    self.RCNN_cls_score = nn.Linear(feat_d, self.n_classes)
     if self.class_agnostic:
-      self.RCNN_bbox_pred = nn.Linear(2048, 4)
+      self.RCNN_bbox_pred = nn.Linear(feat_d, 4)
     else:
-      self.RCNN_bbox_pred = nn.Linear(2048, 4 * self.n_classes)
+      self.RCNN_bbox_pred = nn.Linear(feat_d, 4 * self.n_classes)
 
     # Fix blocks
     for p in self.RCNN_base[0].parameters(): p.requires_grad=False

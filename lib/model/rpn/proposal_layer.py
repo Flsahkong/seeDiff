@@ -46,7 +46,7 @@ class _ProposalLayer(nn.Module):
         # if len(top) > 1:
         #     top[1].reshape(1, 1, 1, 1)
 
-    def forward(self, input):
+    def forward(self, input,target=False):
 
         # Algorithm:
         #
@@ -71,6 +71,8 @@ class _ProposalLayer(nn.Module):
 
         pre_nms_topN  = cfg[cfg_key].RPN_PRE_NMS_TOP_N
         post_nms_topN = cfg[cfg_key].RPN_POST_NMS_TOP_N
+        if target:
+            post_nms_topN = cfg[cfg_key].RPN_POST_NMS_TOP_N_TARGET
         nms_thresh    = cfg[cfg_key].RPN_NMS_THRESH
         min_size      = cfg[cfg_key].RPN_MIN_SIZE
 

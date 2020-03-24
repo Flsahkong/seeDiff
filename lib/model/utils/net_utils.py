@@ -1,7 +1,9 @@
+# coding:utf-8
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.autograd import Variable
+from torch.autograd import Variable,Function
 import numpy as np
 import torchvision.models as models
 from model.utils.config import cfg
@@ -9,6 +11,261 @@ from model.roi_crop.functions.roi_crop import RoICropFunction
 import cv2
 import pdb
 import random
+from torch.utils.data.sampler import Sampler
+
+class sampler(Sampler):
+  def __init__(self, train_size, batch_size):
+    self.num_data = train_size
+    self.num_per_batch = int(train_size / batch_size)
+    self.batch_size = batch_size
+    self.range = torch.arange(0,batch_size).view(1, batch_size).long()
+    self.leftover_flag = False
+    if train_size % batch_size:
+      self.leftover = torch.arange(self.num_per_batch*batch_size, train_size).long()
+      self.leftover_flag = True
+
+  def __iter__(self):
+    rand_num = torch.randperm(self.num_per_batch).view(-1,1) * self.batch_size
+    self.rand_num = rand_num.expand(self.num_per_batch, self.batch_size) + self.range
+
+    self.rand_num_view = self.rand_num.view(-1)
+
+    if self.leftover_flag:
+      self.rand_num_view = torch.cat((self.rand_num_view, self.leftover),0)
+
+    return iter(self.rand_num_view)
+
+  def __len__(self):
+    return self.num_data
+
+
+class EFocalLoss(nn.Module):
+    r"""
+        This criterion is a implemenation of Focal Loss, which is proposed in
+        Focal Loss for Dense Object Detection.
+
+            Loss(x, class) = - \alpha (1-softmax(x)[class])^gamma \log(softmax(x)[class])
+
+        The losses are averaged across observations for each minibatch.
+        Args:
+            alpha(1D Tensor, Variable) : the scalar factor for this criterion
+            gamma(float, double) : gamma > 0; reduces the relative loss for well-classiﬁed examples (p > .5),
+                                   putting more focus on hard, misclassiﬁed examples
+            size_average(bool): size_average(bool): By default, the losses are averaged over observations for each minibatch.
+                                However, if the field size_average is set to False, the losses are
+                                instead summed for each minibatch.
+    """
+
+    def __init__(self, class_num, alpha=None, gamma=2, size_average=True):
+        super(EFocalLoss, self).__init__()
+        if alpha is None:
+            self.alpha = Variable(torch.ones(class_num, 1) * 1.0)
+        else:
+            if isinstance(alpha, Variable):
+                self.alpha = alpha
+            else:
+                self.alpha = Variable(alpha)
+        self.gamma = gamma
+        self.class_num = class_num
+        self.size_average = size_average
+
+    def forward(self, inputs, targets):
+        N = inputs.size(0)
+        # print(N)
+        C = inputs.size(1)
+        # inputs = F.sigmoid(inputs)
+        P = F.softmax(inputs)
+        class_mask = inputs.data.new(N, C).fill_(0)
+        class_mask = Variable(class_mask)
+        ids = targets.view(-1, 1)
+        class_mask.scatter_(1, ids.data, 1.)
+        # print(class_mask)
+
+        if inputs.is_cuda and not self.alpha.is_cuda:
+            self.alpha = self.alpha.cuda()
+        alpha = self.alpha[ids.data.view(-1)]
+
+        probs = (P * class_mask).sum(1).view(-1, 1)
+        log_p = probs.log()
+        # print('probs size= {}'.format(probs.size()))
+        # print(probs)
+        batch_loss = -alpha * torch.exp(-self.gamma * probs) * log_p
+        # print('-----bacth_loss------')
+        # print(batch_loss)
+
+
+        if self.size_average:
+            loss = batch_loss.mean()
+        else:
+            loss = batch_loss.sum()
+        return loss
+class FocalLoss(nn.Module):
+    r"""
+        This criterion is a implemenation of Focal Loss, which is proposed in
+        Focal Loss for Dense Object Detection.
+
+            Loss(x, class) = - \alpha (1-softmax(x)[class])^gamma \log(softmax(x)[class])
+
+        The losses are averaged across observations for each minibatch.
+        Args:
+            alpha(1D Tensor, Variable) : the scalar factor for this criterion
+            gamma(float, double) : gamma > 0; reduces the relative loss for well-classiﬁed examples (p > .5),
+                                   putting more focus on hard, misclassiﬁed examples
+            size_average(bool): size_average(bool): By default, the losses are averaged over observations for each minibatch.
+                                However, if the field size_average is set to False, the losses are
+                                instead summed for each minibatch.
+    """
+
+    def __init__(self, class_num, alpha=None, gamma=2, size_average=True,sigmoid=False,reduce=True):
+        super(FocalLoss, self).__init__()
+        if alpha is None:
+            self.alpha = Variable(torch.ones(class_num, 1) * 1.0)
+        else:
+            if isinstance(alpha, Variable):
+                self.alpha = alpha
+            else:
+                self.alpha = Variable(alpha)
+        self.gamma = gamma
+        self.class_num = class_num
+        self.size_average = size_average
+        self.sigmoid = sigmoid
+        self.reduce = reduce
+    def forward(self, inputs, targets):
+        N = inputs.size(0)
+        # print(N)
+        C = inputs.size(1)
+        if self.sigmoid:
+            P = F.sigmoid(inputs)
+            #F.softmax(inputs)
+            if targets == 0:
+                probs = 1 - P#(P * class_mask).sum(1).view(-1, 1)
+                log_p = probs.log()
+                batch_loss = - (torch.pow((1 - probs), self.gamma)) * log_p
+            if targets == 1:
+                probs = P  # (P * class_mask).sum(1).view(-1, 1)
+                log_p = probs.log()
+                batch_loss = - (torch.pow((1 - probs), self.gamma)) * log_p
+        else:
+            #inputs = F.sigmoid(inputs)
+            P = F.softmax(inputs)
+
+            class_mask = inputs.data.new(N, C).fill_(0)
+            class_mask = Variable(class_mask)
+            ids = targets.view(-1, 1)
+            class_mask.scatter_(1, ids.data, 1.)
+            # print(class_mask)
+
+
+            if inputs.is_cuda and not self.alpha.is_cuda:
+                self.alpha = self.alpha.cuda()
+            alpha = self.alpha[ids.data.view(-1)]
+
+            probs = (P * class_mask).sum(1).view(-1, 1)
+
+            log_p = probs.log()
+            # print('probs size= {}'.format(probs.size()))
+            # print(probs)
+
+            batch_loss = -alpha * (torch.pow((1 - probs), self.gamma)) * log_p
+            # print('-----bacth_loss------')
+            # print(batch_loss)
+
+        if not self.reduce:
+            return batch_loss
+        if self.size_average:
+            loss = batch_loss.mean()
+        else:
+            loss = batch_loss.sum()
+        return loss
+class FocalPseudo(nn.Module):
+    r"""
+        This criterion is a implemenation of Focal Loss, which is proposed in
+        Focal Loss for Dense Object Detection.
+
+            Loss(x, class) = - \alpha (1-softmax(x)[class])^gamma \log(softmax(x)[class])
+
+        The losses are averaged across observations for each minibatch.
+        Args:
+            alpha(1D Tensor, Variable) : the scalar factor for this criterion
+            gamma(float, double) : gamma > 0; reduces the relative loss for well-classiﬁed examples (p > .5),
+                                   putting more focus on hard, misclassiﬁed examples
+            size_average(bool): size_average(bool): By default, the losses are averaged over observations for each minibatch.
+                                However, if the field size_average is set to False, the losses are
+                                instead summed for each minibatch.
+    """
+    def __init__(self, class_num, alpha=None, gamma=2, size_average=True,threshold=0.8):
+        super(FocalPseudo, self).__init__()
+        if alpha is None:
+            self.alpha = Variable(torch.ones(class_num, 1)*1.0)
+        else:
+            if isinstance(alpha, Variable):
+                self.alpha = alpha
+            else:
+                self.alpha = Variable(alpha)
+        self.gamma = gamma
+        self.class_num = class_num
+        self.size_average = size_average
+        self.threshold = threshold
+
+    def forward(self, inputs):
+        N = inputs.size(0)
+        C = inputs.size(1)
+        inputs = inputs[0,:,:]
+        #print(inputs)
+        #pdb.set_trace()
+        inputs,ind = torch.max(inputs,1)
+        ones = torch.ones(inputs.size()).cuda()
+        value = torch.where(inputs>self.threshold,inputs,ones)
+        #
+        #pdb.set_trace()
+        #ind
+        #print(value)
+        try:
+            ind = value.ne(1)
+            indexes = torch.nonzero(ind)
+            #value2 = inputs[indexes]
+            inputs = inputs[indexes]
+            log_p = inputs.log()
+            # print('probs size= {}'.format(probs.size()))
+            # print(probs)
+            if not self.gamma == 0:
+                batch_loss = - (torch.pow((1 - inputs), self.gamma)) * log_p
+            else:
+                batch_loss = - log_p
+        except:
+            #inputs = inputs#[indexes]
+            log_p = value.log()
+            # print('probs size= {}'.format(probs.size()))
+            # print(probs)
+            if not self.gamma == 0:
+                batch_loss = - (torch.pow((1 - inputs), self.gamma)) * log_p
+            else:
+                batch_loss = - log_p
+        # print('-----bacth_loss------')
+        # print(batch_loss)
+        #batch_loss = batch_loss #* weight
+        if self.size_average:
+            try:
+                loss = batch_loss.mean() #+ 0.1*balance
+            except:
+                pdb.set_trace()
+        else:
+            loss = batch_loss.sum()
+        return loss
+class GradReverse(Function):
+    def __init__(self, lambd):
+        self.lambd = lambd
+
+    def forward(self, x):
+        return x.view_as(x)
+
+    def backward(self, grad_output):
+        #pdb.set_trace()
+        return (grad_output * -self.lambd)
+
+
+def grad_reverse(x, lambd=1.0):
+    return GradReverse(lambd)(x)
 
 def save_net(fname, net):
     import h5py
@@ -43,7 +300,9 @@ def clip_gradient(model, clip_norm):
             modulenorm = p.grad.data.norm()
             totalnorm += modulenorm ** 2
     totalnorm = torch.sqrt(totalnorm).item()
+
     norm = (clip_norm / max(totalnorm, clip_norm))
+    #print(norm)
     for p in model.parameters():
         if p.requires_grad:
             p.grad.mul_(norm)
@@ -54,9 +313,13 @@ def vis_detections(im, class_name, dets, thresh=0.8):
         bbox = tuple(int(np.round(x)) for x in dets[i, :4])
         score = dets[i, -1]
         if score > thresh:
-            cv2.rectangle(im, bbox[0:2], bbox[2:4], (0, 204, 0), 2)
-            cv2.putText(im, '%s: %.3f' % (class_name, score), (bbox[0], bbox[1] + 15), cv2.FONT_HERSHEY_PLAIN,
-                        1.0, (0, 0, 255), thickness=1)
+            cv2.rectangle(im, bbox[0:2], bbox[2:4], (0, 0, 204), 3)
+            cv2.putText(im, '%s: %.2f' % (class_name, score), (bbox[0], bbox[1] + 25), cv2.FONT_HERSHEY_PLAIN,
+                        2.0, (0, 0, 0), thickness=3)
+        # if score > thresh:
+        #     cv2.rectangle(im, bbox[0:2], bbox[2:4], (0, 204, 0), 2)
+        #     cv2.putText(im, '%s: %.3f' % (class_name, score), (bbox[0], bbox[1] + 15), cv2.FONT_HERSHEY_PLAIN,
+        #                 1.0, (0, 0, 255), thickness=1)
     return im
 
 
@@ -64,6 +327,16 @@ def adjust_learning_rate(optimizer, decay=0.1):
     """Sets the learning rate to the initial LR decayed by 0.5 every 20 epochs"""
     for param_group in optimizer.param_groups:
         param_group['lr'] = decay * param_group['lr']
+import math
+def calc_supp(iter,iter_total=80000):
+    p = float(iter) / iter_total
+    #print(math.exp(-10*p))
+    return 2 / (1 + math.exp(-10*p)) - 1
+# def adjust_learning_rate(optimizer, decay=0.1,lr_init = 0.001):
+#     """Sets the learning rate to the initial LR decayed by 0.5 every 20 epochs"""
+#     for param_group in optimizer.param_groups:
+#         param_group['lr'] = decay * lr_init#param_group['lr']
+
 
 
 def save_checkpoint(state, filename):

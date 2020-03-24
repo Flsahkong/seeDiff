@@ -7,7 +7,6 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
-import _init_paths
 import os
 import sys
 import numpy as np
@@ -16,7 +15,6 @@ import pprint
 import pdb
 import time
 import cv2
-import imutils
 import torch
 from torch.autograd import Variable
 import torch.nn as nn
@@ -33,8 +31,8 @@ from model.nms.nms_wrapper import nms
 from model.rpn.bbox_transform import bbox_transform_inv
 from model.utils.net_utils import save_net, load_net, vis_detections
 from model.utils.blob import im_list_to_blob
-from model.faster_rcnn.vgg16 import vgg16
-from model.faster_rcnn.resnet import resnet
+from model.faster_rcnn.vgg16_global import vgg16
+from model.faster_rcnn.resnet_global import resnet
 import pdb
 
 try:
@@ -63,10 +61,19 @@ def parse_args():
   parser.add_argument('--load_dir', dest='load_dir',
                       help='directory to load models',
                       default="/srv/share/jyang375/models")
+  parser.add_argument('--load_name', dest='load_name',
+                      help='directory to load models',
+                      default="/srv/share/jyang375/models")
   parser.add_argument('--image_dir', dest='image_dir',
                       help='directory to load images for demo',
                       default="images")
   parser.add_argument('--cuda', dest='cuda',
+                      help='whether use CUDA',
+                      action='store_true')
+  parser.add_argument('--context', dest='context',
+                      help='whether use CUDA',
+                      action='store_true')
+  parser.add_argument('--gc', dest='gc',
                       help='whether use CUDA',
                       action='store_true')
   parser.add_argument('--mGPUs', dest='mGPUs',
@@ -160,10 +167,10 @@ if __name__ == '__main__':
   # -- Note: Use validation set and disable the flipped to enable faster loading.
 
   input_dir = args.load_dir + "/" + args.net + "/" + args.dataset
-  if not os.path.exists(input_dir):
-    raise Exception('There is no input directory for loading network from ' + input_dir)
-  load_name = os.path.join(input_dir,
-    'faster_rcnn_{}_{}_{}.pth'.format(args.checksession, args.checkepoch, args.checkpoint))
+  #if not os.path.exists(input_dir):
+  #  raise Exception('There is no input directory for loading network from ' + input_dir)
+  load_name = args.load_name#os.path.join(input_dir,
+    #'faster_rcnn_{}_{}_{}.pth'.format(args.checksession, args.checkepoch, args.checkpoint))
 
   pascal_classes = np.asarray(['__background__',
                        'aeroplane', 'bicycle', 'bird', 'boat',
@@ -171,12 +178,19 @@ if __name__ == '__main__':
                        'cow', 'diningtable', 'dog', 'horse',
                        'motorbike', 'person', 'pottedplant',
                        'sheep', 'sofa', 'train', 'tvmonitor'])
-
+  pascal_classes = np.asarray(['__background__',  # always index 0
+                               'aeroplane', 'bicycle', 'bus', 'car',
+                               'horse', 'knife', 'motorcycle', 'person',
+                               'plant', 'skateboard', 'train', 'truck'])
+  # initilize the network here.
+  #pascal_classes = np.asarray(['__background__', 'car'])
+  #pascal_classes = ('__background__',  # always index 0
+  #                 'bus', 'bicycle', 'car', 'motorcycle', 'person', 'rider', 'train', 'truck')
   # initilize the network here.
   if args.net == 'vgg16':
-    fasterRCNN = vgg16(pascal_classes, pretrained=False, class_agnostic=args.class_agnostic)
+    fasterRCNN = vgg16(pascal_classes, pretrained=False, class_agnostic=args.class_agnostic,lc=args.lc,gc=args.gc)
   elif args.net == 'res101':
-    fasterRCNN = resnet(pascal_classes, 101, pretrained=False, class_agnostic=args.class_agnostic)
+    fasterRCNN = resnet(pascal_classes, 101, pretrained=False, class_agnostic=args.class_agnostic,context=args.context)
   elif args.net == 'res50':
     fasterRCNN = resnet(pascal_classes, 50, pretrained=False, class_agnostic=args.class_agnostic)
   elif args.net == 'res152':
@@ -217,11 +231,10 @@ if __name__ == '__main__':
     gt_boxes = gt_boxes.cuda()
 
   # make variable
-  with torch.no_grad():
-    im_data = Variable(im_data)
-    im_info = Variable(im_info)
-    num_boxes = Variable(num_boxes)
-    gt_boxes = Variable(gt_boxes)
+  im_data = Variable(im_data, volatile=True)
+  im_info = Variable(im_info, volatile=True)
+  num_boxes = Variable(num_boxes, volatile=True)
+  gt_boxes = Variable(gt_boxes, volatile=True)
 
   if args.cuda > 0:
     cfg.CUDA = True
@@ -230,6 +243,8 @@ if __name__ == '__main__':
     fasterRCNN.cuda()
 
   fasterRCNN.eval()
+  #fasterRCNN.netD.eval()
+  #print(fasterRCNN.RCNN_base[1].running_mean)
 
   start = time.time()
   max_per_image = 100
@@ -264,12 +279,11 @@ if __name__ == '__main__':
         im_file = os.path.join(args.image_dir, imglist[num_images])
         # im = cv2.imread(im_file)
         im_in = np.array(imread(im_file))
-        if len(im_in.shape) == 2:
-          im_in = im_in[:,:,np.newaxis]
-          im_in = np.concatenate((im_in,im_in,im_in), axis=2)
-        # rgb -> bgr
-        im_in = im_in[:,:,::-1]
-      im = im_in
+      if len(im_in.shape) == 2:
+        im_in = im_in[:,:,np.newaxis]
+        im_in = np.concatenate((im_in,im_in,im_in), axis=2)
+      # rgb -> bgr
+      im = im_in[:,:,::-1]
 
       blobs, im_scales = _get_image_blob(im)
       assert len(im_scales) == 1, "Only single-image batch implemented"
@@ -284,14 +298,14 @@ if __name__ == '__main__':
       im_info.data.resize_(im_info_pt.size()).copy_(im_info_pt)
       gt_boxes.data.resize_(1, 1, 5).zero_()
       num_boxes.data.resize_(1).zero_()
-
+      #print(fasterRCNN.RCNN_base[1].running_mean)
       # pdb.set_trace()
       det_tic = time.time()
 
       rois, cls_prob, bbox_pred, \
       rpn_loss_cls, rpn_loss_box, \
       RCNN_loss_cls, RCNN_loss_bbox, \
-      rois_label = fasterRCNN(im_data, im_info, gt_boxes, num_boxes)
+      rois_label,_ = fasterRCNN(im_data, im_info, gt_boxes, num_boxes)
 
       scores = cls_prob.data
       boxes = rois.data[:, :, 1:5]
@@ -323,8 +337,7 @@ if __name__ == '__main__':
           pred_boxes = clip_boxes(pred_boxes, im_info.data, 1)
       else:
           # Simply repeat the boxes, once for each class
-          _ = torch.from_numpy(np.tile(boxes, (1, scores.shape[1])))
-          pred_boxes = _.cuda() if args.cuda > 0 else _
+          pred_boxes = np.tile(boxes, (1, scores.shape[1]))
 
       pred_boxes /= im_scales[0]
 
@@ -352,7 +365,7 @@ if __name__ == '__main__':
             keep = nms(cls_dets, cfg.TEST.NMS, force_cpu=not cfg.USE_GPU_NMS)
             cls_dets = cls_dets[keep.view(-1).long()]
             if vis:
-              im2show = vis_detections(im2show, pascal_classes[j], cls_dets.cpu().numpy(), 0.5)
+              im2show = vis_detections(im2show, pascal_classes[j], cls_dets.cpu().numpy(), 0.8)
 
       misc_toc = time.time()
       nms_time = misc_toc - misc_tic
@@ -365,10 +378,11 @@ if __name__ == '__main__':
       if vis and webcam_num == -1:
           # cv2.imshow('test', im2show)
           # cv2.waitKey(0)
-          result_path = os.path.join(args.image_dir, imglist[num_images][:-4] + "_det.jpg")
+          result_path = os.path.join('images_det',imglist[num_images][:-4] + "_det2.jpg")
           cv2.imwrite(result_path, im2show)
       else:
-          cv2.imshow("frame", im2show)
+          im2showRGB = cv2.cvtColor(im2show, cv2.COLOR_BGR2RGB)
+          cv2.imshow("frame", im2showRGB)
           total_toc = time.time()
           total_time = total_toc - total_tic
           frame_rate = 1 / total_time

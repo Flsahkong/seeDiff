@@ -114,14 +114,30 @@ class imdb(object):
   def append_flipped_images(self):
     num_images = self.num_images
     widths = self._get_widths()
+
     for i in range(num_images):
       boxes = self.roidb[i]['boxes'].copy()
       oldx1 = boxes[:, 0].copy()
       oldx2 = boxes[:, 2].copy()
       boxes[:, 0] = widths[i] - oldx2 - 1
       boxes[:, 2] = widths[i] - oldx1 - 1
-      assert (boxes[:, 2] >= boxes[:, 0]).all()
-      entry = {'boxes': boxes,
+
+      try:
+        assert (boxes[:, 2] >= boxes[:, 0]).all()
+      except:
+        print('error')
+        print(boxes[:, 2] >= boxes[:, 0])
+        print(boxes)
+        print(widths[i])
+      if 'seg_map' in self.roidb[i].keys():
+        seg_map = self.roidb[i]['seg_map'][::-1, :]
+        entry = {'boxes': boxes,
+                 'gt_overlaps': self.roidb[i]['gt_overlaps'],
+                 'gt_classes': self.roidb[i]['gt_classes'],
+                 'flipped': True,
+                 'seg_map':seg_map}
+      else:
+        entry = {'boxes': boxes,
                'gt_overlaps': self.roidb[i]['gt_overlaps'],
                'gt_classes': self.roidb[i]['gt_classes'],
                'flipped': True}

@@ -3,7 +3,9 @@ from __future__ import division
 from __future__ import print_function
 
 from model.utils.config import cfg
-from model.faster_rcnn.faster_rcnn import _fasterRCNN
+from model.faster_rcnn.faster_rcnn_global import _fasterRCNN
+#from model.faster_rcnn.faster_rcnn_imglevel_gradcam  import _fasterRCNN
+
 
 import torch
 import torch.nn as nn
@@ -30,6 +32,44 @@ def conv3x3(in_planes, out_planes, stride=1):
   return nn.Conv2d(in_planes, out_planes, kernel_size=3, stride=stride,
            padding=1, bias=False)
 
+class netD(nn.Module):
+    def __init__(self,context=False):
+        super(netD, self).__init__()
+        self.conv1 = conv3x3(1024, 512, stride=2)
+        self.bn1 = nn.BatchNorm2d(512)
+        self.conv2 = conv3x3(512, 128, stride=2)
+        self.bn2 = nn.BatchNorm2d(128)
+        self.conv3 = conv3x3(128, 128, stride=2)
+        self.bn3 = nn.BatchNorm2d(128)
+        self.fc = nn.Linear(128,2)
+        self.context = context
+        self.leaky_relu = nn.LeakyReLU(negative_slope=0.2, inplace=True)
+    def forward(self, x):
+        x = F.dropout(F.relu(self.bn1(self.conv1(x))),training=self.training)
+        x = F.dropout(F.relu(self.bn2(self.conv2(x))),training=self.training)
+        x = F.dropout(F.relu(self.bn3(self.conv3(x))),training=self.training)
+        x = F.avg_pool2d(x,(x.size(2),x.size(3)))
+        x = x.view(-1,128)
+        if self.context:
+          feat = x
+        x = self.fc(x)
+        if self.context:
+          return x,feat
+        else:
+          return x
+class netD_dc(nn.Module):
+    def __init__(self):
+        super(netD_dc, self).__init__()
+        self.fc1 = nn.Linear(2048,100)
+        self.bn1 = nn.BatchNorm1d(100)
+        self.fc2 = nn.Linear(100,100)
+        self.bn2 = nn.BatchNorm1d(100)
+        self.fc3 = nn.Linear(100,2)
+    def forward(self, x):
+        x = F.dropout(F.relu(self.bn1(self.fc1(x))),training=self.training)
+        x = F.dropout(F.relu(self.bn2(self.fc2(x))),training=self.training)
+        x = self.fc3(x)
+        return x
 
 class BasicBlock(nn.Module):
   expansion = 1
@@ -218,17 +258,22 @@ def resnet152(pretrained=False):
   return model
 
 class resnet(_fasterRCNN):
-  def __init__(self, classes, num_layers=101, pretrained=False, class_agnostic=False):
-    self.model_path = '/home/grad3/keisaito/data/pretrained_model/resnet101_caffe.pth'
+  def __init__(self, classes, num_layers=101, pretrained=False, class_agnostic=False,gc=False):
+    self.model_path = cfg.RESNET_PATH
     self.dout_base_model = 1024
     self.pretrained = pretrained
     self.class_agnostic = class_agnostic
-
-    _fasterRCNN.__init__(self, classes, class_agnostic)
+    self.gc = gc
+    self.layers = num_layers
+    # if self.layers == 50:
+    #   self.model_path = '/home/grad3/keisaito/data/pretrained_model/resnet50_caffe.pth'
+    _fasterRCNN.__init__(self, classes, class_agnostic,gc)
 
   def _init_modules(self):
-    resnet = resnet101()
 
+    resnet = resnet101()
+    if self.layers == 50:
+      resnet = resnet50()
     if self.pretrained == True:
       print("Loading pretrained weights from %s" %(self.model_path))
       state_dict = torch.load(self.model_path)
@@ -237,14 +282,16 @@ class resnet(_fasterRCNN):
     # Build resnet.
     self.RCNN_base = nn.Sequential(resnet.conv1, resnet.bn1,resnet.relu,
       resnet.maxpool,resnet.layer1,resnet.layer2,resnet.layer3)
-
+    self.netD = netD(context=self.context)
     self.RCNN_top = nn.Sequential(resnet.layer4)
-
-    self.RCNN_cls_score = nn.Linear(2048, self.n_classes)
+    feat_d = 2048
+    if self.gc:
+      feat_d += 128
+    self.RCNN_cls_score = nn.Linear(feat_d, self.n_classes)
     if self.class_agnostic:
-      self.RCNN_bbox_pred = nn.Linear(2048, 4)
+      self.RCNN_bbox_pred = nn.Linear(feat_d, 4)
     else:
-      self.RCNN_bbox_pred = nn.Linear(2048, 4 * self.n_classes)
+      self.RCNN_bbox_pred = nn.Linear(feat_d, 4 * self.n_classes)
 
     # Fix blocks
     for p in self.RCNN_base[0].parameters(): p.requires_grad=False
